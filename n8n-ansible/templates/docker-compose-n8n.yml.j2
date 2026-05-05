@@ -1,0 +1,49 @@
+---
+version: "3.8"
+
+services:
+  n8n:
+    image: {{ n8n_image }}
+    container_name: n8n
+    restart: unless-stopped
+    ports:
+      # Solo escuchar en loopback; Nginx hace de proxy público
+      - "127.0.0.1:{{ n8n_port }}:5678"
+    environment:
+      # ── Identidad pública ──────────────────────────────────────────────────
+      - N8N_HOST={{ n8n_domain }}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - NODE_ENV=production
+
+      # ── Webhooks ───────────────────────────────────────────────────────────
+      # WEBHOOK_URL debe terminar en '/' para que N8N construya las URLs correctamente
+      - WEBHOOK_URL=https://{{ n8n_domain }}/
+
+      # ── Seguridad ──────────────────────────────────────────────────────────
+      - N8N_ENCRYPTION_KEY={{ n8n_encryption_key }}
+
+      # ── Zona horaria ──────────────────────────────────────────────────────
+      - GENERIC_TIMEZONE={{ n8n_timezone }}
+      - TZ={{ n8n_timezone }}
+
+      # ── Logs ──────────────────────────────────────────────────────────────
+      - N8N_LOG_LEVEL=info
+
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:5678/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  n8n_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: {{ n8n_data_dir }}/data

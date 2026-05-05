@@ -1,0 +1,17 @@
+# Configuración temporal HTTP para validación ACME (Certbot)
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{ n8n_domain }};
+
+    # Directorio de desafíos ACME
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        allow all;
+    }
+
+    # Todo lo demás → redirect a HTTPS (se activa después del primer cert)
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}

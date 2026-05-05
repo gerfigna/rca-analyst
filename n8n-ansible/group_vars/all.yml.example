@@ -1,0 +1,17 @@
+---
+# ─── Dominio y SSL ────────────────────────────────────────────────────────────
+n8n_domain: "n8n.tudominio.com"
+certbot_email: "admin@tudominio.com"
+
+# ─── N8N ──────────────────────────────────────────────────────────────────────
+n8n_port: 5678
+n8n_data_dir: "/opt/n8n"
+n8n_timezone: "Europe/Madrid"
+n8n_image: "docker.n8n.io/n8nio/n8n:latest"
+
+# Generar con: openssl rand -hex 16
+n8n_encryption_key: "CHANGE_ME_RANDOM_32_CHAR_STRING_HERE"
+
+# ─── CORS ─────────────────────────────────────────────────────────────────────
+# '*' para permitir todos, o especificar: "https://app.tudominio.com"
+cors_allowed_origins: "*"

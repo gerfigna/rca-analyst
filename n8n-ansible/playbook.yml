@@ -1,0 +1,310 @@
+---
+# =============================================================================
+# Playbook: Despliegue de N8N con Nginx + SSL (Let's Encrypt)
+# Target:   Ubuntu 24.04
+# Dominio:  n8n.joinp.com
+# =============================================================================
+- name: Desplegar N8N con Nginx y SSL
+  hosts: n8n_server
+  become: true
+  gather_facts: true
+
+  # ── Variables por defecto (se pueden sobreescribir con -e o en group_vars) ─
+  vars:
+    n8n_domain: "n8n.joinp.com"
+    certbot_email: "admin@joinp.com"
+    n8n_port: 5678
+    n8n_data_dir: "/opt/n8n"
+    n8n_timezone: "Europe/Madrid"
+    n8n_image: "docker.n8n.io/n8nio/n8n:latest"
+    n8n_encryption_key: "CHANGE_ME_RANDOM_32_CHAR_STRING_HERE"
+    cors_allowed_origins: "*"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # PRE-TASKS: Validaciones previas
+  # ─────────────────────────────────────────────────────────────────────────
+  pre_tasks:
+    - name: Verificar que el sistema operativo es Ubuntu 24.04
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_version is version("24.04", ">=")
+        fail_msg: "Este playbook requiere Ubuntu 24.04 o superior."
+        success_msg: "SO verificado: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+
+    - name: Advertir si n8n_encryption_key no fue cambiada
+      ansible.builtin.debug:
+        msg: >
+          ⚠️  ATENCIÓN: La variable n8n_encryption_key tiene el valor por defecto.
+          Cámbiala en group_vars/all.yml antes de ejecutar en producción.
+      when: n8n_encryption_key == "CHANGE_ME_RANDOM_32_CHAR_STRING_HERE"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # TASKS
+  # ─────────────────────────────────────────────────────────────────────────
+  tasks:
+
+    # ── 1. Sistema base ─────────────────────────────────────────────────────
+    - name: Actualizar cache de paquetes APT
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Instalar paquetes base
+      ansible.builtin.apt:
+        name:
+          - curl
+          - ca-certificates
+          - gnupg
+          - lsb-release
+          - apt-transport-https
+          - software-properties-common
+          - python3-pip
+          - python3-docker      # módulo Ansible para Docker
+          - ufw
+        state: present
+
+    # ── 2. Docker ───────────────────────────────────────────────────────────
+    - name: Crear directorio keyring de Docker
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Descargar clave GPG oficial de Docker
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+
+    - name: Agregar repositorio de Docker
+      ansible.builtin.apt_repository:
+        repo: >
+          deb [arch={{ ansible_architecture | replace('x86_64','amd64') }}
+          signed-by=/etc/apt/keyrings/docker.asc]
+          https://download.docker.com/linux/ubuntu
+          {{ ansible_distribution_release }} stable
+        filename: docker
+        state: present
+
+    - name: Instalar Docker Engine y Docker Compose plugin
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: true
+
+    - name: Habilitar y arrancar el servicio Docker
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    # ── 3. Nginx y Certbot ──────────────────────────────────────────────────
+    - name: Instalar Nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+
+    - name: Instalar Certbot y plugin Nginx
+      ansible.builtin.apt:
+        name:
+          - certbot
+          - python3-certbot-nginx
+        state: present
+
+    - name: Habilitar y arrancar Nginx
+      ansible.builtin.systemd:
+        name: nginx
+        enabled: true
+        state: started
+
+    # ── 4. Firewall (UFW) ───────────────────────────────────────────────────
+    - name: Permitir SSH
+      community.general.ufw:
+        rule: allow
+        name: OpenSSH
+
+    - name: Permitir HTTP (80)
+      community.general.ufw:
+        rule: allow
+        port: "80"
+        proto: tcp
+
+    - name: Permitir HTTPS (443)
+      community.general.ufw:
+        rule: allow
+        port: "443"
+        proto: tcp
+
+    - name: Habilitar UFW
+      community.general.ufw:
+        state: enabled
+        policy: deny
+        direction: incoming
+
+    # ── 5. Directorios de N8N ───────────────────────────────────────────────
+    - name: Crear directorio de datos de N8N
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "1000"           # UID del usuario node dentro del contenedor
+        group: "1000"
+        mode: "0755"
+      loop:
+        - "{{ n8n_data_dir }}"
+        - "{{ n8n_data_dir }}/data"
+
+    - name: Crear directorio webroot para Certbot
+      ansible.builtin.file:
+        path: /var/www/certbot
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: "0755"
+
+    # ── 6. Configuración Nginx temporal (HTTP) para validación ACME ─────────
+    - name: Deshabilitar sitio default de Nginx
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload Nginx
+
+    - name: Desplegar configuración Nginx HTTP temporal
+      ansible.builtin.template:
+        src: templates/nginx-n8n-http.conf.j2
+        dest: /etc/nginx/sites-available/{{ n8n_domain }}.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload Nginx
+
+    - name: Activar sitio Nginx
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/{{ n8n_domain }}.conf
+        dest: /etc/nginx/sites-enabled/{{ n8n_domain }}.conf
+        state: link
+      notify: Reload Nginx
+
+    - name: Forzar recarga de Nginx antes de Certbot
+      ansible.builtin.meta: flush_handlers
+
+    # ── 7. Obtener certificado SSL con Certbot ──────────────────────────────
+    - name: Verificar si ya existe certificado para el dominio
+      ansible.builtin.stat:
+        path: /etc/letsencrypt/live/{{ n8n_domain }}/fullchain.pem
+      register: cert_stat
+
+    - name: Obtener certificado SSL con Certbot (webroot)
+      ansible.builtin.command: >
+        certbot certonly
+        --webroot
+        --webroot-path /var/www/certbot
+        --non-interactive
+        --agree-tos
+        --email {{ certbot_email }}
+        --domains {{ n8n_domain }}
+        --rsa-key-size 4096
+      when: not cert_stat.stat.exists
+      register: certbot_result
+      changed_when: certbot_result.rc == 0
+
+    - name: Verificar que el certificado fue generado
+      ansible.builtin.stat:
+        path: /etc/letsencrypt/live/{{ n8n_domain }}/fullchain.pem
+      register: cert_check
+      failed_when: not cert_check.stat.exists
+
+    # ── 8. Configuración Nginx definitiva (HTTPS + CORS) ────────────────────
+    - name: Desplegar configuración Nginx con SSL y CORS
+      ansible.builtin.template:
+        src: templates/nginx-n8n.conf.j2
+        dest: /etc/nginx/sites-available/{{ n8n_domain }}.conf
+        owner: root
+        group: root
+        mode: "0644"
+        validate: nginx -t -c /etc/nginx/nginx.conf
+      notify: Reload Nginx
+
+    - name: Configurar renovación automática de certificados (cron)
+      ansible.builtin.cron:
+        name: "Certbot renew N8N SSL"
+        minute: "0"
+        hour: "3"
+        weekday: "1,4"        # Lunes y jueves a las 3am
+        job: >
+          certbot renew --quiet --post-hook "systemctl reload nginx"
+        user: root
+
+    # ── 9. Desplegar N8N con Docker Compose ────────────────────────────────
+    - name: Copiar archivo docker-compose de N8N
+      ansible.builtin.template:
+        src: templates/docker-compose-n8n.yml.j2
+        dest: "{{ n8n_data_dir }}/docker-compose.yml"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Levantar N8N con Docker Compose
+      community.docker.docker_compose_v2:
+        project_src: "{{ n8n_data_dir }}"
+        state: present
+        pull: always
+      register: n8n_compose_result
+
+    - name: Esperar a que N8N esté disponible (healthcheck)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ n8n_port }}/healthz"
+        method: GET
+        status_code: 200
+      register: n8n_health
+      retries: 15
+      delay: 10
+      until: n8n_health.status == 200
+
+    # ── 10. Recarga final de Nginx ──────────────────────────────────────────
+    - name: Recarga final de Nginx (configuración completa)
+      ansible.builtin.meta: flush_handlers
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # POST-TASKS: Verificación
+  # ─────────────────────────────────────────────────────────────────────────
+  post_tasks:
+    - name: Verificar que Nginx responde en HTTPS
+      ansible.builtin.uri:
+        url: "https://{{ n8n_domain }}/healthz"
+        method: GET
+        status_code: 200
+        validate_certs: true
+      delegate_to: localhost
+      become: false
+      register: https_check
+      ignore_errors: true
+
+    - name: Mostrar resultado del despliegue
+      ansible.builtin.debug:
+        msg:
+          - "════════════════════════════════════════════"
+          - "  N8N desplegado correctamente"
+          - "  URL:        https://{{ n8n_domain }}"
+          - "  Webhook:    https://{{ n8n_domain }}/webhook/<id>"
+          - "  HTTPS check: {{ 'OK ✔' if https_check.status == 200 else 'PENDIENTE (verificar DNS)' }}"
+          - "════════════════════════════════════════════"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # HANDLERS
+  # ─────────────────────────────────────────────────────────────────────────
+  handlers:
+    - name: Reload Nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: reloaded
+
+    - name: Restart Nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: restarted
