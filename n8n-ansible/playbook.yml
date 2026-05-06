@@ -158,6 +158,9 @@
       loop:
         - "{{ n8n_data_dir }}"
         - "{{ n8n_data_dir }}/data"
+        - "{{ n8n_data_dir }}/shared"
+        - "{{ n8n_data_dir }}/shared/data"
+        - "{{ n8n_data_dir }}/shared/skills"
 
     - name: Crear directorio webroot para Certbot
       ansible.builtin.file:
@@ -243,7 +246,24 @@
           certbot renew --quiet --post-hook "systemctl reload nginx"
         user: root
 
-    # ── 9. Desplegar N8N con Docker Compose ────────────────────────────────
+    # ── 9. MCP Server ───────────────────────────────────────────────────────
+    - name: Sincronizar skills del MCP server al servidor
+      ansible.builtin.copy:
+        src: ../shared/skills/
+        dest: "{{ n8n_data_dir }}/shared/skills/"
+        owner: "1000"
+        group: "1000"
+        mode: "0644"
+
+    - name: Sincronizar código del MCP server al servidor
+      ansible.builtin.copy:
+        src: ../mcp-server/
+        dest: "{{ n8n_data_dir }}/mcp-server/"
+        owner: root
+        group: root
+        mode: "0644"
+
+    # ── 10. Desplegar N8N con Docker Compose ───────────────────────────────
     - name: Copiar archivo docker-compose de N8N
       ansible.builtin.template:
         src: templates/docker-compose-n8n.yml.j2
